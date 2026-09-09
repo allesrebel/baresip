@@ -1502,7 +1502,11 @@ bool audio_ismuted(const struct audio *a)
 	if (!a)
 		return false;
 
-	return a->tx.muted;
+	mtx_lock(a->tx.mtx);
+	bool muted = a->tx.muted;
+	mtx_unlock(a->tx.mtx);
+
+	return muted;
 }
 
 
