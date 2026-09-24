@@ -172,7 +172,6 @@ static double autx_calc_seconds(const struct autx *autx)
 }
 
 
-/* returns 0 if the thread was stopped, ENOENT if it was not running */
 static int stop_tx_thread(struct autx *tx)
 {
 	if (!re_atomic_rlx(&tx->thr.run))
