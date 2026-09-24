@@ -172,16 +172,23 @@ static double autx_calc_seconds(const struct autx *autx)
 }
 
 
+static void stop_tx_thread(struct autx *tx)
+{
+	if (!re_atomic_rlx(&tx->thr.run))
+		return;
+
+	re_atomic_rlx_set(&tx->thr.run, false);
+	thrd_join(tx->thr.tid, NULL);
+}
+
+
 static void stop_tx(struct autx *tx, struct audio *a)
 {
 	if (!tx || !a)
 		return;
 
 	stream_enable_tx(a->strm, false);
-	if (re_atomic_rlx(&tx->thr.run)) {
-		re_atomic_rlx_set(&tx->thr.run, false);
-		thrd_join(tx->thr.tid, NULL);
-	}
+	stop_tx_thread(tx);
 
 	/* audio source must be stopped first */
 	tx->ausrc = mem_deref(tx->ausrc);
@@ -917,6 +924,23 @@ loop:
 }
 
 
+static int start_tx_thread(struct audio *a)
+{
+	struct autx *tx = &a->tx;
+	int err;
+
+	if (re_atomic_rlx(&tx->thr.run))
+		return 0;
+
+	re_atomic_rlx_set(&tx->thr.run, true);
+	err = thread_create_name(&tx->thr.tid, "Audio TX", tx_thread, a);
+	if (err)
+		re_atomic_rlx_set(&tx->thr.run, false);
+
+	return err;
+}
+
+
 static void aufilt_param_set(struct aufilt_prm *prm,
 			     const struct aucodec *ac, enum aufmt fmt)
 {
@@ -1109,17 +1133,9 @@ static int start_source(struct autx *tx, struct audio *a, struct list *ausrcl)
 		mtx_unlock(tx->mtx);
 		tx->as = ausrc_find(ausrcl, tx->module);
 
-		if (!re_atomic_rlx(&tx->thr.run)) {
-			re_atomic_rlx_set(&tx->thr.run, true);
-			err = thread_create_name(&tx->thr.tid,
-						 "Audio TX",
-						 tx_thread, a);
-			if (err) {
-				re_atomic_rlx_set(&tx->thr.run,
-						  false);
-				return err;
-			}
-		}
+		err = start_tx_thread(a);
+		if (err)
+			return err;
 
 		info("audio: source started with sample format %s\n",
 		     aufmt_name(tx->src_fmt));
