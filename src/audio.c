@@ -178,8 +178,8 @@ static int stop_tx_thread(struct autx *tx)
 	if (!re_atomic_rlx(&tx->thr.run))
 		return ENOENT;
 
-	if (thrd_equal(tx->thr.tid, thrd_current()))
-		return EDEADLK;
+	if (re_thread_check(false))
+		return EPERM;
 
 	re_atomic_rlx_set(&tx->thr.run, false);
 
