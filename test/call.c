@@ -4073,6 +4073,113 @@ int test_call_audio_set_source(void)
 }
 
 
+static void rx_metric_snapshot(const struct stream *strm,
+			       uint32_t *packets, uint32_t *bytes)
+{
+	do {
+		*packets = stream_metric_get_rx_n_packets(strm);
+		*bytes = stream_metric_get_rx_n_bytes(strm);
+	}
+	while (*packets != stream_metric_get_rx_n_packets(strm));
+}
+
+
+static int test_call_l16_ptime_base(uint32_t srate, uint8_t ch,
+				  uint32_t request, uint32_t wire_ptime)
+{
+	struct fixture fix = {0}, *f = &fix;
+	struct cancel_rule *cr;
+	struct agent *agents[] = {&f->a, &f->b};
+	uint32_t psize = 2 * au_calc_nsamp(srate, ch, wire_ptime);
+	char prm[64];
+	int err;
+
+	re_snprintf(prm, sizeof(prm), ";ptime=%u;audio_codecs=L16/%u/%u",
+		    request, srate, ch);
+	fixture_init_prm(f, prm);
+	f->behaviour = BEHAVIOUR_ANSWER;
+	f->estab_action = ACTION_NOTHING;
+
+	cancel_rule_new(BEVENT_CALL_RTPESTAB, f->b.ua, 1, 0, 1);
+	cancel_rule_and(BEVENT_CALL_RTPESTAB, f->a.ua, 0, 0, 1);
+	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_OFF);
+	TEST_ERR(err);
+	err = re_main_timeout(5000);
+	TEST_ERR(err);
+	TEST_ERR(f->err);
+
+	for (size_t i = 0; i < RE_ARRAY_SIZE(agents); i++) {
+		struct stream *strm;
+		const char *attr;
+		uint32_t n, bytes;
+
+		strm = audio_strm(call_audio(ua_call(agents[i]->ua)));
+		attr = sdp_media_rattr(stream_sdpmedia(strm), "ptime");
+		ASSERT_TRUE(attr != NULL);
+		ASSERT_EQ(request, (uint32_t)atoi(attr));
+		rx_metric_snapshot(strm, &n, &bytes);
+		ASSERT_TRUE(n > 0);
+		ASSERT_EQ(n * psize, bytes);
+		ASSERT_TRUE(psize <= 1400);
+	}
+
+ out:
+	fixture_close(f);
+	return err;
+}
+
+
+int test_call_l16_ptime(void)
+{
+	static const struct {
+		uint32_t srate;
+		uint8_t ch;
+		uint32_t cap;
+	} cases[] = {
+		{48000, 2, 7},
+		{44100, 2, 7},
+		{32000, 2, 10},
+		{16000, 2, 21},
+		{ 8000, 2, 43},
+		{48000, 1, 14},
+		{44100, 1, 15},
+		{32000, 1, 21},
+		{16000, 1, 43},
+		{ 8000, 1, 87},
+	};
+	int err;
+
+	err = module_load(".", "l16");
+	TEST_ERR(err);
+	err = module_load(".", "ausine");
+	TEST_ERR(err);
+
+	for (size_t i = 0; i < RE_ARRAY_SIZE(cases); i++) {
+		const struct aucodec *ac;
+
+		ac = aucodec_find(baresip_aucodecl(), "L16", cases[i].srate,
+				 cases[i].ch);
+		ASSERT_TRUE(ac != NULL);
+		ASSERT_EQ(cases[i].cap, ac->ptime);
+
+		/* Exercise every row with three request sizes. */
+		err = test_call_l16_ptime_base(ac->srate, ac->ch,
+					       20, min(20, cases[i].cap));
+		TEST_ERR(err);
+		err = test_call_l16_ptime_base(ac->srate, ac->ch, 5, 5);
+		TEST_ERR(err);
+		err = test_call_l16_ptime_base(ac->srate, ac->ch,
+					       60, min(60, cases[i].cap));
+		TEST_ERR(err);
+	}
+
+ out:
+	module_unload("ausine");
+	module_unload("l16");
+	return err;
+}
+
+
 struct multipart_uas {
 	struct fixture *f;
 	struct sip *sip;
