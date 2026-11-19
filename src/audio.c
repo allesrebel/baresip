@@ -570,6 +570,7 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 	mtx_lock(tx->mtx);
 	enum aufmt fmt = tx->src_fmt;
 	size_t psize = tx->psize;
+	size_t aubuf_maxsz = tx->aubuf_maxsz;
 	mtx_unlock(tx->mtx);
 
 	if (fmt != af->fmt) {
@@ -583,7 +584,7 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 	if (re_atomic_rlx(&tx->muted))
 		auframe_mute(af);
 
-	if (aubuf_cur_size(tx->aubuf) >= tx->aubuf_maxsz) {
+	if (aubuf_cur_size(tx->aubuf) >= aubuf_maxsz) {
 
 		mtx_lock(tx->mtx);
 		uint64_t aubuf_overrun = ++tx->stats.aubuf_overrun;
@@ -1161,6 +1162,31 @@ static int autx_set_psize(struct autx *tx, const struct ausrc_prm *prm)
 }
 
 
+/*
+ * Set the packet time for sending. A running audio source is packetized
+ * again, so that the packet size always matches the packet time.
+ */
+static int autx_set_ptime(struct autx *tx, uint32_t ptime)
+{
+	struct ausrc_prm prm = tx->ausrc_prm;
+	int err = 0;
+
+	mtx_lock(tx->mtx);
+
+	if (tx->ausrc && prm.ptime != ptime) {
+		prm.ptime = ptime;
+		err = autx_set_psize(tx, &prm);
+	}
+
+	if (!err)
+		tx->ptime = ptime;
+
+	mtx_unlock(tx->mtx);
+
+	return err;
+}
+
+
 static int start_source(struct autx *tx, struct audio *a, struct list *ausrcl)
 {
 	const struct aucodec *ac = tx->ac;
@@ -1480,7 +1506,7 @@ int audio_encoder_set(struct audio *a, const struct aucodec *ac,
 
 	/* use a codec-specific ptime */
 	if (ac->ptime)
-		tx->ptime = ac->ptime;
+		err = autx_set_ptime(tx, ac->ptime);
 
 	return err;
 }
@@ -1682,17 +1708,7 @@ void audio_sdp_attr_decode(struct audio *a)
 			info("audio: peer changed ptime_tx %ums -> %ums\n",
 			     a->tx.ptime, ptime_tx);
 
-			tx->ptime = ptime_tx;
-
-			if (tx->ac) {
-				size_t sz;
-
-				sz = aufmt_sample_size(tx->src_fmt);
-
-				tx->psize = sz * au_calc_nsamp(tx->ac->srate,
-							    tx->ac->ch,
-							    ptime_tx);
-			}
+			(void)autx_set_ptime(tx, ptime_tx);
 
 			sdp_media_set_lattr(stream_sdpmedia(a->strm), true,
 					    "ptime", "%u", ptime_tx);

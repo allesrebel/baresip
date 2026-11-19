@@ -4027,6 +4027,131 @@ int test_call_audio_set_source(void)
 }
 
 
+static void tx_metric_snapshot(const struct stream *strm,
+			       uint32_t *packets, uint32_t *bytes)
+{
+	/* both counters are updated by the transmit thread */
+	do {
+		*packets = stream_metric_get_tx_n_packets(strm);
+		*bytes = stream_metric_get_tx_n_bytes(strm);
+	}
+	while (*packets != stream_metric_get_tx_n_packets(strm));
+}
+
+
+/* Verify the RTP payload size of the packets sent by both agents */
+static int check_tx_psize(struct fixture *f, uint32_t psize)
+{
+	struct agent *agv[] = {&f->a, &f->b};
+	const struct stream *strmv[RE_ARRAY_SIZE(agv)];
+	uint32_t packetv[RE_ARRAY_SIZE(agv)], bytesv[RE_ARRAY_SIZE(agv)];
+	struct tx_wait w;
+	int err;
+
+	tmr_init(&w.tmr);
+
+	for (size_t i = 0; i < RE_ARRAY_SIZE(agv); i++) {
+		strmv[i] = audio_strm(call_audio(ua_call(agv[i]->ua)));
+		tx_metric_snapshot(strmv[i], &packetv[i], &bytesv[i]);
+	}
+
+	w.strm = strmv[0];
+	w.n_packets = packetv[0] + 5;
+	tmr_start(&w.tmr, 1, tx_wait_handler, &w);
+
+	err = re_main_timeout(5000);
+	TEST_ERR(err);
+	TEST_ERR(f->err);
+
+	for (size_t i = 0; i < RE_ARRAY_SIZE(agv); i++) {
+		uint32_t packets, bytes;
+
+		tx_metric_snapshot(strmv[i], &packets, &bytes);
+		ASSERT_TRUE(packets > packetv[i]);
+		ASSERT_EQ((packets - packetv[i]) * psize, bytes - bytesv[i]);
+	}
+
+ out:
+	tmr_cancel(&w.tmr);
+
+	return err;
+}
+
+
+/* Send a re-INVITE from B and wait until both agents have applied the SDP */
+static int reinvite_from_b(struct fixture *f)
+{
+	struct cancel_rule *cr;
+	int err;
+
+	cancel_rule_new(BEVENT_CALL_REMOTE_SDP, f->a.ua, 0, 0, 1);
+	cr->prm = "offer";
+	cancel_rule_and(BEVENT_CALL_REMOTE_SDP, f->b.ua, 1, 0, 1);
+	cr->prm = "answer";
+
+	err = call_modify(ua_call(f->b.ua));
+	TEST_ERR(err);
+
+	err = re_main_timeout(5000);
+	cancel_rule_pop();
+	TEST_ERR(err);
+	TEST_ERR(f->err);
+
+	err = agent_wait_for_ack(&f->a, 0, 0, 1);
+	TEST_ERR(err);
+
+ out:
+	return err;
+}
+
+
+int test_call_ptime_reinvite(void)
+{
+	struct fixture fix = {0}, *f = &fix;
+	struct cancel_rule *cr;
+	const uint32_t psize = 2 * au_calc_nsamp(32000, 2, 10);
+	int err;
+
+	err  = module_load(".", "l16");
+	err |= module_load(".", "ausine");
+	TEST_ERR(err);
+
+	/* L16/32000/2 is sent with 10 ms, the accounts ask for 20 ms */
+	fixture_init_prm(f, ";ptime=20;audio_codecs=l16/32000/2");
+
+	cancel_rule_new(BEVENT_CALL_RTPESTAB, f->b.ua, 1, 0, 1);
+	cancel_rule_and(BEVENT_CALL_RTPESTAB, f->a.ua, 0, 0, 1);
+
+	f->behaviour = BEHAVIOUR_ANSWER;
+	f->estab_action = ACTION_NOTHING;
+
+	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_OFF);
+	TEST_ERR(err);
+
+	err = re_main_timeout(5000);
+	cancel_rule_pop();
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	err = check_tx_psize(f, psize);
+	TEST_ERR(err);
+
+	/* the a=ptime:20 of the peer must not change the packet size */
+	err = reinvite_from_b(f);
+	TEST_ERR(err);
+
+	err = check_tx_psize(f, psize);
+	TEST_ERR(err);
+
+ out:
+	fixture_close(f);
+	module_unload("ausine");
+	module_unload("l16");
+
+	return err;
+}
+
+
 struct multipart_uas {
 	struct fixture *f;
 	struct sip *sip;
