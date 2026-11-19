@@ -92,6 +92,7 @@ struct autx {
 	void *sampv;                  /**< Sample buffer                   */
 	size_t sampvsz;               /**< Sample buffer size in [bytes]   */
 	uint32_t ptime;               /**< Packet time for sending         */
+	uint32_t ptime_req;           /**< Requested packet time           */
 	uint64_t ts_ext;              /**< Ext. Timestamp for outgoing RTP */
 	uint32_t ts_base;             /**< First timestamp sent            */
 	uint32_t ts_tel;              /**< Timestamp for Telephony Events  */
@@ -879,6 +880,7 @@ int audio_alloc(struct audio **ap, struct list *streaml,
 	tx->module = mem_ref(a->ausrc_mod);
 	tx->device = mem_ref(a->ausrc_dev);
 	tx->ptime  = ptime;
+	tx->ptime_req = ptime;
 	tx->ts_ext = tx->ts_base = rand_u16();
 	tx->marker = true;
 
@@ -1163,13 +1165,17 @@ static int autx_set_psize(struct autx *tx, const struct ausrc_prm *prm)
 
 
 /*
- * Set the packet time for sending. A running audio source is packetized
- * again, so that the packet size always matches the packet time.
+ * Set the packet time for sending, limited to the maximum of the codec.
+ * A running audio source is packetized again, so that the packet size
+ * always matches the packet time.
  */
 static int autx_set_ptime(struct autx *tx, uint32_t ptime)
 {
 	struct ausrc_prm prm = tx->ausrc_prm;
 	int err = 0;
+
+	if (tx->ac && tx->ac->ptime)
+		ptime = min(ptime, tx->ac->ptime);
 
 	mtx_lock(tx->mtx);
 
@@ -1504,9 +1510,8 @@ int audio_encoder_set(struct audio *a, const struct aucodec *ac,
 
 	telev_set_srate(a->telev, ac->crate);
 
-	/* use a codec-specific ptime */
-	if (ac->ptime)
-		err = autx_set_ptime(tx, ac->ptime);
+	/* the codec may limit the requested ptime */
+	err = autx_set_ptime(tx, tx->ptime_req);
 
 	return err;
 }
@@ -1702,12 +1707,13 @@ void audio_sdp_attr_decode(struct audio *a)
 		struct autx *tx = &a->tx;
 		uint32_t ptime_tx = atoi(attr);
 
-		if (ptime_tx && ptime_tx != a->tx.ptime
+		if (ptime_tx && ptime_tx != tx->ptime_req
 		    && ptime_tx <= MAX_PTIME) {
 
 			info("audio: peer changed ptime_tx %ums -> %ums\n",
-			     a->tx.ptime, ptime_tx);
+			     tx->ptime_req, ptime_tx);
 
+			tx->ptime_req = ptime_tx;
 			(void)autx_set_ptime(tx, ptime_tx);
 
 			sdp_media_set_lattr(stream_sdpmedia(a->strm), true,

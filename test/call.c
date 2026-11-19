@@ -4152,6 +4152,157 @@ int test_call_ptime_reinvite(void)
 }
 
 
+static void rx_metric_snapshot(const struct stream *strm,
+			       uint32_t *packets, uint32_t *bytes)
+{
+	do {
+		*packets = stream_metric_get_rx_n_packets(strm);
+		*bytes = stream_metric_get_rx_n_bytes(strm);
+	}
+	while (*packets != stream_metric_get_rx_n_packets(strm));
+}
+
+
+static int test_call_ptime_cap_base(uint32_t aptime, uint32_t wire_ptime)
+{
+	struct fixture fix = {0}, *f = &fix;
+	struct cancel_rule *cr;
+	struct stream *strm;
+	const char *attr;
+	uint32_t bytes, n;
+	size_t psize;
+	char prm[64];
+	int err;
+
+	re_snprintf(prm, sizeof(prm),
+		    ";ptime=%u;audio_codecs=aucmock/48000/2", aptime);
+	fixture_init_prm(f, prm);
+
+	psize = 4 * (48000 * wire_ptime / 1000);
+
+	cancel_rule_new(BEVENT_CALL_RTPESTAB, f->b.ua, 1, 0, 1);
+	cancel_rule_and(BEVENT_CALL_RTPESTAB, f->a.ua, 0, 0, 1);
+
+	f->behaviour = BEHAVIOUR_ANSWER;
+	f->estab_action = ACTION_NOTHING;
+
+	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_OFF);
+	TEST_ERR(err);
+	err = re_main_timeout(5000);
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	strm = audio_strm(call_audio(ua_call(f->a.ua)));
+
+	/* the answer mirrors the raw request, not the effective cap */
+	attr = sdp_media_rattr(stream_sdpmedia(strm), "ptime");
+	ASSERT_TRUE(attr != NULL);
+	ASSERT_EQ(aptime, (uint32_t)atoi(attr));
+
+	rx_metric_snapshot(strm, &n, &bytes);
+	ASSERT_TRUE(n > 0);
+	ASSERT_EQ(n * psize, bytes);
+
+	strm = audio_strm(call_audio(ua_call(f->b.ua)));
+	rx_metric_snapshot(strm, &n, &bytes);
+	ASSERT_TRUE(n > 0);
+	ASSERT_EQ(n * psize, bytes);
+
+ out:
+	fixture_close(f);
+	return err;
+}
+
+
+static int test_call_ptime_cap_reinvite(void)
+{
+	struct fixture fix = {0}, *f = &fix;
+	struct cancel_rule *cr;
+	struct sdp_format *pcmu;
+	struct sdp_media *m;
+	int err;
+
+	/* aucmock has a maximum of 10 ms, the accounts ask for 20 ms */
+	fixture_init_prm(f, ";ptime=20"
+			 ";audio_codecs=aucmock/48000/2,PCMU/8000/1");
+
+	cancel_rule_new(BEVENT_CALL_RTPESTAB, f->b.ua, 1, 0, 1);
+	cancel_rule_and(BEVENT_CALL_RTPESTAB, f->a.ua, 0, 0, 1);
+
+	f->behaviour = BEHAVIOUR_ANSWER;
+	f->estab_action = ACTION_NOTHING;
+
+	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_OFF);
+	TEST_ERR(err);
+
+	err = re_main_timeout(5000);
+	cancel_rule_pop();
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	m = stream_sdpmedia(audio_strm(call_audio(ua_call(f->b.ua))));
+
+	/* a request of the peer below the maximum is used as it is */
+	err = sdp_media_set_lattr(m, true, "ptime", "%u", 5);
+	TEST_ERR(err);
+	err = reinvite_from_b(f);
+	TEST_ERR(err);
+	err = check_tx_psize(f, 4 * 48000 * 5 / 1000);
+	TEST_ERR(err);
+
+	/* a request above the maximum is limited */
+	err = sdp_media_set_lattr(m, true, "ptime", "%u", 20);
+	TEST_ERR(err);
+	err = reinvite_from_b(f);
+	TEST_ERR(err);
+	err = check_tx_psize(f, 4 * 48000 * 10 / 1000);
+	TEST_ERR(err);
+
+	/* a codec without maximum gets the request back, also if the
+	 * offer has no a=ptime */
+	sdp_media_del_lattr(m, "ptime");
+	pcmu = sdp_media_format(m, true, NULL, -1, "PCMU", 8000, 1);
+	ASSERT_TRUE(pcmu != NULL);
+	list_unlink(&pcmu->le);
+	list_prepend((struct list *)sdp_media_format_lst(m, true),
+		     &pcmu->le, pcmu);
+	err = reinvite_from_b(f);
+	TEST_ERR(err);
+	err = check_tx_psize(f, 8000 * 20 / 1000);
+	TEST_ERR(err);
+
+ out:
+	fixture_close(f);
+
+	return err;
+}
+
+
+int test_call_ptime_cap(void)
+{
+	int err;
+
+	mock_aucodec_register();
+
+	err = module_load(".", "ausine");
+	TEST_ERR(err);
+
+	err = test_call_ptime_cap_base(60, 10);
+	TEST_ERR(err);
+	err = test_call_ptime_cap_base(10, 10);
+	TEST_ERR(err);
+	err = test_call_ptime_cap_base(5, 5);
+	TEST_ERR(err);
+	err = test_call_ptime_cap_reinvite();
+	TEST_ERR(err);
+
+ out:
+	module_unload("ausine");
+	mock_aucodec_unregister();
+	return err;
+}
+
+
 struct multipart_uas {
 	struct fixture *f;
 	struct sip *sip;
